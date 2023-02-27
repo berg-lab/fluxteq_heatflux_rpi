@@ -2,21 +2,23 @@
 
 # realtime data logger script by Akram Ali
 # Updated on 10/05/2021
+# Updated on 2/27/2023 by Jackie McAninch
 
 from datetime import datetime
 from influxdb import InfluxDBClient
 import time
 from pathlib import Path
 import subprocess
+import os
 
 # get hostname of Pi to identify which one it is
-hostname = subprocess.check_output('hostname', shell=True).strip()
+hostname = subprocess.check_output('hostname', shell=True).decode('utf-8').strip()
 
 now = datetime.now()   # get current date/time
 logging_start_time = now.strftime('%Y-%m-%d_%H%M%S')    # format datetime to use in filename
-temp_data_dir = '/var/tmp/temp_heatflux'
-data_dir = '/home/pi/heatflux/data'
-server = 'server-url'
+temp_data_dir = './temp'
+data_dir = './data'
+server = 'data.elemental-platform.com'
 influx_port = 8086
 user = 'user'
 passwd = 'password'
@@ -24,172 +26,88 @@ db = 'database'
 
 time.sleep(10) # sleep 10 seconds to let data come in first
 
+def convert_to_float(string):
+    try:
+        f = float(string)
+        return f
+    except ValueError:
+        return 0.0
+
 
 # function to find, parse, log and upload data files
 def logdata(_dt):
 
     # get data from temp file
     try:
-        file = open('%s/t.csv' % (temp_data_dir),'r')        
-        dataline = file.readline()
-        file.close()
-    except:
-        print ("failed to open temp file")
-        pass
-
+        os.makedirs(temp_data_dir, exist_ok=True)
+        with open(f'{temp_data_dir}/t.csv','rb') as f:
+            dataline = f.readline()
+    except Exception as e:
+        print(f'(datalogger.py) Failed to open temp file: {e}')
+        
     # parse data
     data = []
-    try:
-        for p in dataline.strip().split(","): #strip() removes trailing \n
-            data.append(p)
-    except:
-        pass
+    for p in dataline.decode('utf-8').strip().split(","): #strip() removes trailing \n
+        data.append(p)
+    if len(data) != 8:
+        print(f'(datalogger.py) Insufficient data from temp file.')
+        return
+    else:
+        print(f'Data read successfully!\n\t{data}')
 
     # save data to file
-    filename = '%s/%s_%s_%s.csv' % (data_dir, hostname, 'heatflux', logging_start_time)
+    os.makedirs(data_dir, exist_ok=True)
+    filename = f'{data_dir}/{hostname}_heatflux_{logging_start_time}.csv'
     my_file = Path(filename)
     if my_file.is_file():   # if file already exists, i.e., logging started
         try:
-            file = open(filename,'a')   # open file in append mode
-            file.write(str(_dt) + ',')   # write formatted datetime
-            file.write(dataline)
-            # file.write('\n')
-            file.close()
-        except:
-            print ('Error: Failed to open file %s' % filename)
-            pass
+            with open(filename,'a') as file:   # open file in append mode
+                file.write(str(_dt) + ',')   # write formatted datetime
+                file.write(",".join(data))
+                file.write("\n")
+        except Exception as e:
+            print(f'(datalogger.py) Error: Failed to open file: {e}')
+
     
     # file does not exist, write headers to it, followed by data. This should happen first time when creating file only
     else:   
         try:
-            file = open(filename,'w')   # open file in write mode
-            file.write('Date/Time')
-            for n in range(1,9):
-                file.write(',')
-                if n % 2 == 0:
-                    file.write('Temperature (C) (Ch %d)' % int(n/2))
-                else:
-                    file.write('Heat Flux (W/m2) (Ch %d)' % round(n-n/2))
-            file.write('\n')
-            file.close()
-        except:
-            pass
-
-
-    # upload data
-    json_body = [   # first create JSON body
-        {
-            "measurement": "heatflux",
-            "tags": {
-                "pi": hostname,
-                "channel": 1
-            },
-            "fields": {
-                "value": float(data[0])
-            }
-        },
-        {
-            "measurement": "temperature",
-            "tags": {
-                "pi": hostname,
-                "channel": 1
-            },
-            "fields": {
-                "value": float(data[1])
-            }
-        },
-                {
-            "measurement": "heatflux",
-            "tags": {
-                "pi": hostname,
-                "channel": 2
-            },
-            "fields": {
-                "value": float(data[2])
-            }
-        },
-        {
-            "measurement": "temperature",
-            "tags": {
-                "pi": hostname,
-                "channel": 2
-            },
-            "fields": {
-                "value": float(data[3])
-            }
-        },
-                {
-            "measurement": "heatflux",
-            "tags": {
-                "pi": hostname,
-                "channel": 3
-            },
-            "fields": {
-                "value": float(data[4])
-            }
-        },
-        {
-            "measurement": "temperature",
-            "tags": {
-                "pi": hostname,
-                "channel": 3
-            },
-            "fields": {
-                "value": float(data[5])
-            }
-        },
-                {
-            "measurement": "heatflux",
-            "tags": {
-                "pi": hostname,
-                "channel": 4
-            },
-            "fields": {
-                "value": float(data[6])
-            }
-        },
-        {
-            "measurement": "temperature",
-            "tags": {
-                "pi": hostname,
-                "channel": 4
-            },
-            "fields": {
-                "value": float(data[7])
-            }
-        }
-    ]
-
+            with open(filename,'a') as file: # open file in append mode
+                file.write('Date/Time')
+                for n in range(1,9):
+                    file.write(f',{"Temperature (C)" if n%2==0 else "Heat Flux (W/m2)"} (Sensor {n//2})')
+        except Exception as e:
+            print(f'(datalogger.py) Error: Failed to open file: {e}')
     # start influx session and upload
     try:
         client = InfluxDBClient(server, influx_port, user, passwd, db)
-        result = client.write_points(json_body)
+        json_data = []
+        # create entry to upload
+        for i in range(len(data)):
+            # i represents the channel being read
+            json_data.append(
+                {
+                    "measurement": "heatflux" if i%2==0 else "temperature",
+                    "tags": {
+                        "pi": hostname,
+                        "sensor":(i//2)+1
+                    },
+                    "fields": {
+                        "value": convert_to_float(data[i])
+                    },
+                    "time": int(time.time() * 1000)
+                }
+            )
+        result = client.write_points(json_data, database=db, time_precision='ms', batch_size=8, protocol='json')    
         client.close()
-        print("Result: {0}".format(result))
-    except:
-        print('Error connecting/uploading to InfluxDB')
+    except Exception as e:
+        print(f'Error connecting/uploading to InfluxDB: {e}')
 
 
 # loop forever
 while True:
      # this will log data every second
-    for i in range(0,60):
+    time.sleep(1)
+    dt = datetime.now().strftime('%Y/%m/%d %H:%M:%S')
+    logdata(dt)
 
-        flag = None
-        while flag is None:     # keep trying to match seconds with real time
-            dt = datetime.now().strftime('%Y/%m/%d %H:%M:%S')
-            second = datetime.now().strftime("%S")
-
-            if int(second) == i:
-                flag = 1
-                break
-            else:
-                time.sleep(0.5)
-                pass
-
-        if int(second) == 0 and flag == 1:
-            logdata(dt)     # save to SD card & upload
-        else:
-            pass
-
-        time.sleep(0.1) # sleep script so the CPU is not bogged down
